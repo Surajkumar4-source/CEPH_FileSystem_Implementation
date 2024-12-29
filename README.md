@@ -135,6 +135,217 @@
 
 
 
+<br>
+<br>
+
+
+# ********************* Implementation ***********************
+
+<br>
+<br>
+
+
+# ************************ SERVER SETUP ***************************
+
+
+## Servers:  (Make any Number of server just copy the server commands )
+
+### Step 1: Install Ceph Repository on All Nodes
+
+   - *Adding Ceph repository and installing dependencies:* The centos-release-ceph-squid package is installed to access the Ceph packages. Podman is also required, and CephADM is the tool for managing the Ceph cluster.
+
+```yml
+
+sudo yum install -y centos-release-ceph-squid podman
+
+sudo yum update -y
+
+sudo yum install -y cephadm python3-jinja2
+
+```
+
+
+**Update** /etc/hosts **on all nodes:** Make sure that all nodes (including the client node) are added to the /etc/hosts file for proper DNS resolution.
+
+```yml
+
+echo "192.168.230.xxx node1"  | sudo tee -a /etc/hosts
+echo "192.168.230.xxx node2"  | sudo tee -a /etc/hosts
+echo "192.168.230.xxx node3"  | sudo tee -a /etc/hosts
+echo "192.168.230.xxx client" | sudo tee -a /etc/hosts
+
+```
+
+### Step 2: SSH Configuration
+  **SSH keys:** SSH keys must be generated and distributed across nodes for password-less login.
+
+```yml
+
+ssh-keygen
+ssh-copy-id root@node-1
+ssh-copy-id root@node-2
+ssh-copy-id root@node-3
+
+```
+
+## Step 3: Ceph Cluster Deployment
+
+  *Bootstrap the Ceph cluster on the admin node: The cephadm tool is used to bootstrap the cluster. You need to specify the IP of the monitor.*
+  
+```yml
+cephadm bootstrap --mon-ip 192.168.1.101    # change with your IP      
+```
+
+- *Copy the configuration to other nodes: To propagate the configuration and keyring to other nodes, use the cephadm shell and ssh-copy-id to transfer the public key.*
+
+```yml
+
+/usr/sbin/cephadm shell ceph cephadm get-pub-key > ceph.pub
+ssh-copy-id -f -i ceph.pub root@node2
+ssh-copy-id -f -i ceph.pub root@node3
+
+```
+
+- *Add OSDs (Object Storage Daemons): OSDs are added to each node, specifying the devices for storage (e.g., /dev/nvme1, /dev/nvme2).*
+
+  - *Add Hosts to Ceph Cluster*
+
+```yml
+
+/usr/sbin/cephadm shell ceph orch host add node1
+/usr/sbin/cephadm shell ceph orch host add node2
+/usr/sbin/cephadm shell ceph orch host add node3
+
+```
+  - *Add OSDs to Each Node*
+    
+      - *Specify the storage devices and run these commands:*
+
+```yml
+
+  /usr/sbin/cephadm shell ceph orch daemon add osd node1:/dev/nvme1
+  /usr/sbin/cephadm shell ceph orch daemon add osd node1:/dev/nvme2
+  /usr/sbin/cephadm shell ceph orch daemon add osd node2:/dev/nvme1
+  /usr/sbin/cephadm shell ceph orch daemon add osd node2:/dev/nvme2
+  /usr/sbin/cephadm shell ceph orch daemon add osd node3:/dev/nvme1
+  /usr/sbin/cephadm shell ceph orch daemon add osd node3:/dev/nvme2
+
+```
+
+- *Check Ceph cluster status: Check the health and status of the Ceph cluster after adding the OSDs.*
+
+```yml
+
+cephadm shell ceph health
+cephadm shell ceph -s
+
+```
+
+- *Create and configure CephFS (Ceph File System): Create pools and a new CephFS filesystem.*
+  
+```yml
+
+cephadm shell ceph osd pool create cephfs_metadata 8
+cephadm shell ceph osd pool create cephfs_data 8
+cephadm shell ceph fs new cephfs cephfs_metadata cephfs_data
+cephadm shell ceph fs ls
+
+```
+
+# ************************ CLIENT SETUP ***************************
+
+## Client:
+
+### Step 4: Ceph Client Setup
+
+- *Install Ceph common:* On the client node, install Ceph's common packages so the client can interact with the cluster.
+
+```yml
+
+sudo yum install -y centos-release-ceph-squid
+dnf install epel-release -y
+sudo yum install -y ceph-common
+
+```
+
+- *Copy configuration to client node:* The client must have access to the Ceph configuration file (ceph.conf) and keyring.  ()
+
+```yml
+
+scp /etc/ceph/ceph.conf root@client-node:/etc/ceph/
+scp /etc/ceph/ceph.client.admin.keyring root@client-node:/etc/ceph/
+sudo chmod +r /etc/ceph/ceph.client.admin.keyring
+
+```
+
+- *Check Ceph health on the client:* After setting up, check the health of the Ceph cluster.
+
+```yml
+
+sudo ceph health
+sudo ceph health detail
+sudo ceph -s
+
+```
+
+- *Create a Ceph storage pool:* This pool can be used for RBD (RADOS Block Device).
+
+```yml
+sudo ceph osd pool create rbd 128 3
+```
+
+## Step 5: Ceph Client Configuration
+
+- *Create an RBD block device:* Create an RBD image on the client node and disable certain features for kernel compatibility.
+
+```yml
+
+rbd create disk01 --size 4096
+rbd ls -l
+modprobe rbd
+rbd feature disable disk01 exclusive-lock object-map fast-diff deep-flatten
+rbd map disk01
+rbd showmapped
+
+```
+
+- *Format and mount the block device:* Format the device with XFS and mount it.
+
+```yml
+
+mkfs.xfs /dev/rbd0
+mkdir -p /mnt/mydisk
+mount /dev/rbd0 /mnt/mydisk
+df -h
+dd if=/dev/zero of=file1.txt bs=1024 count=220040
+```
+
+
+- *Mount CephFS:* Mount the Ceph filesystem on the client node.
+
+```yml
+
+ceph fs ls
+ceph orch apply mds cephfs --placement="count:1"
+ceph mds stat
+ceph auth get-key client.admin
+echo -n "AQC7wHBnt+4GFhAAoUkcntGGFVfw2jXdEnWfUQ==" | base64
+sudo mkdir /mnt/cephfs
+sudo mount -t ceph node1:6789:/ /mnt/cephfs -o name=admin,secret=QVFDTjlIQm4zMmZyREJBQUZwZFVMNHBnUzBrUWlKSWdKTmJ3dFE9PQ==
+
+```
+
+
+<br>
+
+
+*This implementation provides a fully functional Ceph storage cluster with CephFS and RBD. The client node can access and use both block devices (RBD) and the file system (CephFS). Ensure that all nodes have proper networking and firewall configurations to allow communication between them.*
+
+
+
+
+
+
 
 
 
